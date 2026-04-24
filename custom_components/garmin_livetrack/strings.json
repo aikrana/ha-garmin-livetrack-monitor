@@ -1,0 +1,76 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "IMAP Connection",
+                "description": "Configure the IMAP server that receives your Garmin LiveTrack notification emails.",
+                "data": {
+                    "imap_server": "IMAP Server",
+                    "imap_port": "Port",
+                    "imap_username": "Username (email)",
+                    "imap_password": "Password (app password recommended)",
+                    "email_max_age_minutes": "Ignore emails older than (minutes)"
+                }
+            },
+            "person": {
+                "title": "Add Tracked Person",
+                "description": "Add the first person to monitor. You can add more later in the integration options.\n\nThe **full name** must match exactly what appears in the Garmin LiveTrack email body.\nThe **entity prefix** is used to create entity IDs (e.g. 'john' → sensor.garmin_livetrack_john).",
+                "data": {
+                    "name": "Full name (as in email)",
+                    "entity_prefix": "Entity prefix (e.g. john)",
+                    "enable_device_tracker": "Create device tracker entities",
+                    "poll_interval": "Poll interval (seconds)"
+                }
+            }
+        },
+        "error": {
+            "imap_dns_error": "Could not resolve the IMAP server hostname. Check the server address for typos.",
+            "imap_connection_error": "Could not connect to the IMAP server. It may be offline, behind a firewall, or the port may be wrong.",
+            "imap_tls_error": "SSL/TLS handshake failed. Check the port (usually 993) and that the server supports implicit SSL.",
+            "imap_auth_error": "IMAP login was rejected. Check the username and password. For Gmail, use an App Password instead of your normal password.",
+            "imap_folder_error": "The IMAP folder could not be opened. Check that the folder name exists (default: INBOX).",
+            "imap_unknown_error": "IMAP test failed with an unexpected error. See the Home Assistant logs for details.",
+            "invalid_prefix": "Entity prefix must contain only letters, numbers, and underscores.",
+            "duplicate_prefix": "This entity prefix is already in use."
+        },
+        "abort": {
+            "already_configured": "This IMAP account is already configured."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Garmin LiveTrack Monitor",
+                "menu_options": {
+                    "add_person": "Add tracked person",
+                    "remove_person": "Remove tracked person",
+                    "settings": "General settings"
+                }
+            },
+            "add_person": {
+                "title": "Add Tracked Person",
+                "data": {
+                    "name": "Full name (as in Garmin email)",
+                    "entity_prefix": "Entity prefix"
+                }
+            },
+            "remove_person": {
+                "title": "Remove Tracked Person",
+                "data": {
+                    "person_to_remove": "Person to remove"
+                }
+            },
+            "settings": {
+                "title": "General Settings",
+                "data": {
+                    "enable_device_tracker": "Create device tracker entities",
+                    "poll_interval": "Poll interval (seconds)",
+                    "email_max_age_minutes": "Ignore emails older than (minutes)"
+                }
+            }
+        },
+        "abort": {
+            "no_persons": "No tracked persons to remove."
+        }
+    }
+}

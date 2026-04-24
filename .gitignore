@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Private / AI working context ─────────────────────────────────────────────
+# These files are used locally by Claude/AI assistants to understand the
+# project but are not meant for the public repository.  They remain in the
+# working directory (and are read on every AI session) but are excluded from
+# git so pushing to github.com/aikrana/... doesn't leak them.
+CLAUDE.md
+docs/
+.claude/
+.claude-*
+

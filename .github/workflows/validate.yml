@@ -1,0 +1,33 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly run catches upstream breaking changes in hassfest / HACS rules
+    # without having to push a commit.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
+          # `brands` is skipped until the project has icon assets either
+          # locally at custom_components/garmin_livetrack/brand/icon.png or
+          # merged into the home-assistant/brands repository.  All other
+          # HACS checks stay enforced.
+          ignore: brands

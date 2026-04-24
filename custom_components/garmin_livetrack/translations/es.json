@@ -1,0 +1,76 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Conexión IMAP",
+                "description": "Configura el servidor IMAP que recibe los emails de notificación de Garmin LiveTrack.",
+                "data": {
+                    "imap_server": "Servidor IMAP",
+                    "imap_port": "Puerto",
+                    "imap_username": "Usuario (email)",
+                    "imap_password": "Contraseña (se recomienda contraseña de app)",
+                    "email_max_age_minutes": "Ignorar emails más antiguos de (minutos)"
+                }
+            },
+            "person": {
+                "title": "Añadir persona",
+                "description": "Añade la primera persona a monitorizar. Puedes añadir más después en las opciones de la integración.\n\nEl **nombre completo** debe coincidir exactamente con el que aparece en el cuerpo del email de Garmin LiveTrack.\nEl **prefijo de entidad** se usa para crear los IDs de las entidades (ej. 'juan' → sensor.garmin_livetrack_juan).",
+                "data": {
+                    "name": "Nombre completo (como en el email)",
+                    "entity_prefix": "Prefijo de entidad (ej. juan)",
+                    "enable_device_tracker": "Crear entidades device tracker",
+                    "poll_interval": "Intervalo de sondeo (segundos)"
+                }
+            }
+        },
+        "error": {
+            "imap_dns_error": "No se pudo resolver el nombre del servidor IMAP. Revisa la dirección del servidor.",
+            "imap_connection_error": "No se pudo conectar al servidor IMAP. Puede estar apagado, bloqueado por un firewall, o el puerto es incorrecto.",
+            "imap_tls_error": "Fallo en el handshake SSL/TLS. Revisa el puerto (normalmente 993) y que el servidor soporte SSL implícito.",
+            "imap_auth_error": "Las credenciales IMAP han sido rechazadas. Revisa usuario y contraseña. En Gmail, usa una App Password en vez de tu contraseña normal.",
+            "imap_folder_error": "No se pudo abrir la carpeta IMAP. Comprueba que el nombre existe (por defecto: INBOX).",
+            "imap_unknown_error": "El test IMAP falló con un error inesperado. Consulta los logs de Home Assistant para más detalles.",
+            "invalid_prefix": "El prefijo de entidad solo puede contener letras, números y guiones bajos.",
+            "duplicate_prefix": "Este prefijo de entidad ya está en uso."
+        },
+        "abort": {
+            "already_configured": "Esta cuenta IMAP ya está configurada."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Garmin LiveTrack Monitor",
+                "menu_options": {
+                    "add_person": "Añadir persona",
+                    "remove_person": "Eliminar persona",
+                    "settings": "Ajustes generales"
+                }
+            },
+            "add_person": {
+                "title": "Añadir persona",
+                "data": {
+                    "name": "Nombre completo (como en el email de Garmin)",
+                    "entity_prefix": "Prefijo de entidad"
+                }
+            },
+            "remove_person": {
+                "title": "Eliminar persona",
+                "data": {
+                    "person_to_remove": "Persona a eliminar"
+                }
+            },
+            "settings": {
+                "title": "Ajustes generales",
+                "data": {
+                    "enable_device_tracker": "Crear entidades device tracker",
+                    "poll_interval": "Intervalo de sondeo (segundos)",
+                    "email_max_age_minutes": "Ignorar emails más antiguos de (minutos)"
+                }
+            }
+        },
+        "abort": {
+            "no_persons": "No hay personas para eliminar."
+        }
+    }
+}

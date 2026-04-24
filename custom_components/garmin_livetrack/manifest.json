@@ -1,0 +1,16 @@
+{
+    "domain": "garmin_livetrack",
+    "name": "Garmin LiveTrack Monitor",
+    "codeowners": ["@aikrana"],
+    "config_flow": true,
+    "dependencies": [],
+    "documentation": "https://github.com/aikrana/ha-garmin-livetrack-monitor",
+    "integration_type": "hub",
+    "iot_class": "cloud_push",
+    "issue_tracker": "https://github.com/aikrana/ha-garmin-livetrack-monitor/issues",
+    "requirements": [
+        "cloudscraper>=1.2.71",
+        "aioimaplib>=1.0.0"
+    ],
+    "version": "1.0.0"
+}

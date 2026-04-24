@@ -1,0 +1,65 @@
+name: Bug report
+description: Something is not working as expected
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        Before submitting, please:
+        - Make sure you are running the **latest release** of the integration.
+        - Enable debug logging for the integration: Developer Tools → Actions →
+          `logger.set_level` with
+          `custom_components.garmin_livetrack: debug`, then reproduce the issue.
+        - Download a **diagnostics dump**: Settings → Devices & Services →
+          *Garmin LiveTrack Monitor* → ⋮ → **Download diagnostics**.
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: "2026.4.0"
+    validations:
+      required: true
+  - type: input
+    id: ha_install_type
+    attributes:
+      label: Home Assistant install type
+      description: e.g. HAOS, Container, Core, Supervised
+      placeholder: "HAOS"
+    validations:
+      required: true
+  - type: input
+    id: email_provider
+    attributes:
+      label: Email provider
+      description: Gmail, Outlook, self-hosted Dovecot, etc.
+      placeholder: "Gmail"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What went wrong
+      description: Include what you did, what you expected, and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the debug log lines filtered by `garmin_livetrack`.
+      render: shell
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics file
+      description: Drag and drop the diagnostics JSON here (or paste its contents).
