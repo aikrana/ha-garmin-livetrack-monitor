@@ -106,15 +106,21 @@ class LiveTrackDeviceTracker(TrackerEntity):
 
     @property
     def latitude(self) -> float | None:
+        # Report the last known latitude as long as the session has ever had
+        # a GPS fix, regardless of whether it is currently active.  This lets
+        # HA's zone-matching produce a meaningful state after the session
+        # ends (e.g. the tracker resolves to "home" if the activity finished
+        # inside the home zone), and keeps the `finished`-state sensor
+        # attributes consistent with the tracker's coordinates.
         state = self._hub.get_state(self._person_id)
-        if state and state.state == STATE_ACTIVE and state.has_location:
+        if state and state.has_location:
             return state.latitude
         return None
 
     @property
     def longitude(self) -> float | None:
         state = self._hub.get_state(self._person_id)
-        if state and state.state == STATE_ACTIVE and state.has_location:
+        if state and state.has_location:
             return state.longitude
         return None
 

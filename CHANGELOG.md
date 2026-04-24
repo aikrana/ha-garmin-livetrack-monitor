@@ -2,6 +2,12 @@
 
 All notable changes to this integration will be documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-04-24
+
+### Fixed
+
+- **Device tracker coordinates are now preserved after the session ends.** Previously, `latitude` and `longitude` would return `None` once the sensor moved to `finished`, which prevented Home Assistant's zone-matching from resolving the tracker's state (e.g. to `home` or a named zone) after an activity completed. The tracker now keeps reporting the last known GPS point for as long as the session has ever acquired a fix, and `location_name` remains active-only so zone-matching takes over naturally once the activity is over.
+
 ## [1.0.0] — 2026-04-24
 
 First public release.

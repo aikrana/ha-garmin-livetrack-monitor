@@ -12,5 +12,5 @@
         "cloudscraper>=1.2.71",
         "aioimaplib>=1.0.0"
     ],
-    "version": "1.0.0"
+    "version": "1.0.1"
 }
