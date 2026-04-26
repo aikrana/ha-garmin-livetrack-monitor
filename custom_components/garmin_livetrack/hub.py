@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -58,6 +59,7 @@ from .const import (
     CONF_SENDER,
     DEFAULT_EMAIL_MAX_AGE,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_POST_TRACK_POINT_FREQUENCY,
     DOMAIN,
     EVENT_ACTIVITY_DETECTED,
     EVENT_ACTIVITY_ENDED,
@@ -476,15 +478,24 @@ class LiveTrackHub:
         # entirely either — a long ride can outlast any reasonable cap.
         consecutive_failures = 0
 
+        # Throttle window for the (more expensive) track-points request.
+        # The session metadata request runs every poll_interval regardless;
+        # track-points is gated by the device's posting frequency reported in
+        # the session payload (`postTrackPointFrequency`, seconds).
+        # next_track_points_allowed_at is an epoch-seconds timestamp.  0
+        # means "no point seen yet, fire-at-will".
+        next_track_points_allowed_at = 0.0
+        post_freq = DEFAULT_POST_TRACK_POINT_FREQUENCY
+
         _LOGGER.debug("Tracking loop started for %s", person_id)
 
         try:
             while state.state == STATE_ACTIVE:
-                begin = self._compute_begin(state)
-
+                # ── 1. Session metadata (always, every iteration) ──────────
+                # Cheap (~500 B), drives end-of-activity detection.
                 try:
-                    data = await self.hass.async_add_executor_job(
-                        scraper.fetch, begin
+                    session = await self.hass.async_add_executor_job(
+                        scraper.fetch_session
                     )
                 except Exception as err:  # noqa: BLE001
                     consecutive_failures += 1
@@ -498,67 +509,137 @@ class LiveTrackHub:
                         else _LOGGER.error
                     )
                     log_fn(
-                        "Scraper error for %s (attempt %d, retry in %ds): %s",
+                        "Session fetch error for %s "
+                        "(attempt %d, retry in %ds): %s",
                         person_id, consecutive_failures, backoff, err,
                     )
                     await asyncio.sleep(backoff)
                     continue
 
-                # Successful fetch — clear the failure counter.
-                if consecutive_failures:
-                    _LOGGER.info(
-                        "Scraper recovered for %s after %d failure(s)",
-                        person_id, consecutive_failures,
-                    )
-                    consecutive_failures = 0
-
                 # Apply session info
-                session = data.get("session", {})
                 if session.get("start"):
                     state.session_start = session["start"]
                     state.session_end = session.get("end")
+                if session.get("post_track_point_frequency"):
+                    post_freq = session["post_track_point_frequency"]
 
-                if session and not session.get("in_progress", True):
+                # Has the session ended on the server side?  Don't break yet —
+                # we still want one final track-points fetch to capture the
+                # last position (and the END marker if it exists).  That fetch
+                # bypasses the throttle below.
+                session_ended = bool(session) and not session.get(
+                    "in_progress", True
+                )
+
+                # ── 2. Track-points (throttled by device posting frequency) ─
+                now = time.time()
+                should_fetch_points = (
+                    session_ended  # final fetch on session-end, ignore throttle
+                    or now >= next_track_points_allowed_at
+                )
+
+                if should_fetch_points:
+                    begin = self._compute_begin(state)
+                    try:
+                        points = await self.hass.async_add_executor_job(
+                            scraper.fetch_track_points, begin
+                        )
+                    except Exception as err:  # noqa: BLE001
+                        consecutive_failures += 1
+                        backoff = min(
+                            poll_interval * (2 ** (consecutive_failures - 1)),
+                            SCRAPER_BACKOFF_MAX,
+                        )
+                        log_fn = (
+                            _LOGGER.warning
+                            if consecutive_failures <= 3
+                            else _LOGGER.error
+                        )
+                        log_fn(
+                            "Track-points fetch error for %s "
+                            "(attempt %d, retry in %ds): %s",
+                            person_id, consecutive_failures, backoff, err,
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    # Both halves of this iteration succeeded — reset backoff.
+                    if consecutive_failures:
+                        _LOGGER.info(
+                            "Scraper recovered for %s after %d failure(s)",
+                            person_id, consecutive_failures,
+                        )
+                        consecutive_failures = 0
+
+                    if points:
+                        last_point = points[-1]
+                        is_new = state.apply_point(last_point)
+
+                        # Activity detected event (once per session)
+                        if (
+                            not state._activity_event_emitted
+                            and state.activity_type
+                            and state.last_datetime
+                            and state.session_start
+                        ):
+                            state._activity_event_emitted = True
+                            self.hass.bus.async_fire(
+                                EVENT_ACTIVITY_DETECTED,
+                                {
+                                    ATTR_PERSON_ID: person_id,
+                                    ATTR_PERSON_NAME: state.config.name,
+                                    ATTR_ACTIVITY_TYPE: state.activity_type,
+                                    ATTR_DATETIME: state.last_datetime,
+                                },
+                            )
+
+                        # Point-received event (every genuinely new point)
+                        if is_new:
+                            self.hass.bus.async_fire(
+                                EVENT_POINT_RECEIVED,
+                                state.point_attributes,
+                            )
+
+                        # Schedule next allowed track-points fetch.  Anchor on
+                        # the dateTime of the last received point + the
+                        # device's posting frequency + a 2-second grace buffer
+                        # for round-trip + clock drift.
+                        if state.last_datetime:
+                            try:
+                                last_ts = datetime.fromisoformat(
+                                    state.last_datetime.replace("Z", "+00:00")
+                                ).timestamp()
+                                next_track_points_allowed_at = (
+                                    last_ts + post_freq + 2
+                                )
+                            except (ValueError, TypeError):
+                                pass
+
+                        # END flag inside the point itself terminates the
+                        # session (Garmin only sends this when the user
+                        # actually pressed STOP+SAVE on the watch, not always).
+                        if state.has_point_end and state.state == STATE_ACTIVE:
+                            _LOGGER.info(
+                                "Session finished for %s (END event)",
+                                person_id,
+                            )
+                            state.state = STATE_FINISHED
+                else:
+                    # Session-only iteration succeeded; clear backoff.
+                    if consecutive_failures:
+                        _LOGGER.info(
+                            "Scraper recovered for %s after %d failure(s)",
+                            person_id, consecutive_failures,
+                        )
+                        consecutive_failures = 0
+
+                # Honour server-side end detection if the END marker didn't.
+                if session_ended and state.state == STATE_ACTIVE:
                     _LOGGER.info(
-                        "Session finished for %s (session end)", person_id
+                        "Session finished for %s (server-side end timestamp)",
+                        person_id,
                     )
                     state.state = STATE_FINISHED
-
-                # Apply track-point
-                last_point = data.get("last_point")
-                if last_point:
-                    is_new = state.apply_point(last_point)
-
-                    # Fire activity detected event (once)
-                    if (
-                        not state._activity_event_emitted
-                        and state.activity_type
-                        and state.last_datetime
-                        and state.session_start
-                    ):
-                        state._activity_event_emitted = True
-                        self.hass.bus.async_fire(
-                            EVENT_ACTIVITY_DETECTED,
-                            {
-                                ATTR_PERSON_ID: person_id,
-                                ATTR_PERSON_NAME: state.config.name,
-                                ATTR_ACTIVITY_TYPE: state.activity_type,
-                                ATTR_DATETIME: state.last_datetime,
-                            },
-                        )
-
-                    # Fire point received event (every new point)
-                    if is_new:
-                        self.hass.bus.async_fire(
-                            EVENT_POINT_RECEIVED,
-                            state.point_attributes,
-                        )
-
-                    if state.has_point_end:
-                        _LOGGER.info(
-                            "Session finished for %s (END event)", person_id
-                        )
-                        state.state = STATE_FINISHED
 
                 async_dispatcher_send(self.hass, SIGNAL_UPDATE, person_id)
 

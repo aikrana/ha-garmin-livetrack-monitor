@@ -24,6 +24,13 @@ DEFAULT_SENDER = "noreply@garmin.com"
 DEFAULT_EMAIL_MAX_AGE = 5  # minutes
 DEFAULT_POLL_INTERVAL = 6  # seconds
 
+# Fallback for the device's track-point posting frequency (seconds).
+# Used by the tracking loop to throttle track-point fetches when the
+# session response doesn't include `postTrackPointFrequency`.  5 s is
+# slightly under the typical 6-second poll interval to avoid throttling
+# on devices that post faster than the documented frequency.
+DEFAULT_POST_TRACK_POINT_FREQUENCY = 5  # seconds
+
 # ── Events ───────────────────────────────────────────────────────────────────
 EVENT_ACTIVITY_STARTED = f"{DOMAIN}_activity_started"
 EVENT_ACTIVITY_DETECTED = f"{DOMAIN}_activity_detected"
