@@ -39,7 +39,12 @@ from .const import LIVETRACK_URL_REGEX
 
 _LOGGER = logging.getLogger(__name__)
 
-_IDLE_TIMEOUT = 25 * 60        # seconds (RFC-recommended max is ~29 min)
+_IDLE_TIMEOUT = 25 * 60        # seconds — IDLE session length cap (RFC 2177 says < 30 min)
+_IDLE_HEARTBEAT = 300          # seconds — re-IDLE every N seconds even with no
+                               #   server push, as a watchdog against half-open
+                               #   sockets and aioimaplib's silent EXISTS swallow
+                               #   (https://github.com/iroco-co/aioimaplib/issues/120).
+                               #   Must be < _IDLE_TIMEOUT.
 _POLL_INTERVAL = 60            # seconds (when the server has no IDLE)
 _RECONNECT_DELAY_BASE = 5
 _RECONNECT_DELAY_MAX = 300
@@ -184,20 +189,15 @@ class IMAPListener:
                 _LOGGER.error("IMAP login failed: %s", resp.lines)
                 return False
 
-            # Check IDLE capability.  aioimaplib's idle implementation will
-            # happily attempt IDLE even if unsupported, so this guard saves
-            # us from a disconnect storm on non-IDLE servers.
-            try:
-                cap_resp = await self._client.capability()
-                caps = self._flatten_lines(cap_resp.lines).upper()
-                self._supports_idle = " IDLE " in f" {caps} "
-                _LOGGER.debug(
-                    "Capabilities: IDLE=%s, advertised=%s",
-                    self._supports_idle, caps[:200],
-                )
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("CAPABILITY failed (%s) — assuming IDLE", err)
-                self._supports_idle = True
+            # Detect IDLE capability.  `has_capability` is sync and reads from
+            # the table populated by the server greeting + LOGIN response.
+            # (We previously called `capability()` which doesn't exist on
+            # IMAP4_SSL — only on the underlying IMAP4ClientProtocol.  The
+            # exception was caught and silently fell back to assuming IDLE.)
+            self._supports_idle = self._client.has_capability("IDLE")
+            _LOGGER.debug(
+                "IDLE capability advertised by server: %s", self._supports_idle
+            )
 
             resp = await self._client.select(self._folder)
             if resp.result != "OK":
@@ -269,22 +269,83 @@ class IMAPListener:
             await self._disconnect()
 
     async def _idle_loop(self) -> None:
-        while self._running and self._client:
-            try:
-                idle_task = await self._client.idle_start(timeout=_IDLE_TIMEOUT)
-                push = await self._client.wait_server_push()
-                self._client.idle_done()
-                await asyncio.wait_for(idle_task, timeout=10)
-            except asyncio.TimeoutError:
-                continue
-            except (aioimaplib.Abort, ConnectionError, OSError):
-                return
+        """IDLE long-poll loop with heartbeat watchdog.
 
-            _LOGGER.debug("IMAP IDLE push: %r", push)
-            # Any mailbox change is a trigger to re-query — EXISTS, EXPUNGE,
-            # FLAGS, etc.  The SEARCH criteria + watermark filters down to
-            # actually-new mail so false wakes are cheap.
-            await self._check_new()
+        We pass an explicit ``timeout`` to ``wait_server_push`` so that when
+        no server push arrives within ``_IDLE_HEARTBEAT`` seconds, we still
+        cycle out and re-IDLE.  This protects against:
+
+        * Half-open TCP sockets (NAT timeouts, server-side disconnects with
+          no FIN/RST) — the next ``idle_start`` exercises the socket and
+          fails fast, triggering our reconnect path.
+        * `aioimaplib` issue #120, where an EXISTS push can sit buffered in
+          the protocol layer and never reach our wait queue until another
+          command runs.  We always issue a NOOP after exiting IDLE to flush
+          that buffer, then run a SEARCH so any silently-buffered push gets
+          picked up the next iteration regardless.
+        """
+        while self._running and self._client:
+            idle_task: asyncio.Future | None = None
+            try:
+                # Bound idle_start itself: aioimaplib issue #110 reports it
+                # can hang if the server closes the connection mid-call.
+                async with asyncio.timeout(30):
+                    idle_task = await self._client.idle_start(
+                        timeout=_IDLE_TIMEOUT
+                    )
+
+                try:
+                    push = await self._client.wait_server_push(
+                        timeout=_IDLE_HEARTBEAT
+                    )
+                    _LOGGER.debug("IMAP IDLE push: %r", push)
+                except asyncio.TimeoutError:
+                    _LOGGER.debug(
+                        "IMAP IDLE heartbeat tick (no push for %ds)",
+                        _IDLE_HEARTBEAT,
+                    )
+
+                # Exit IDLE cleanly; await the future with its own bound so
+                # a stuck DONE doesn't trap us forever.
+                self._client.idle_done()
+                async with asyncio.timeout(10):
+                    await idle_task
+
+                # NOOP forces the protocol to flush any buffered server
+                # pushes (workaround for aioimaplib #120) and acts as a fast
+                # liveness probe — half-open sockets surface here in seconds.
+                async with asyncio.timeout(15):
+                    await self._client.noop()
+
+                # Always re-check.  Cheap (one UID SEARCH against a tiny
+                # range) and catches any push that aioimaplib silently
+                # swallowed, regardless of whether wait_server_push saw it.
+                await self._check_new()
+
+            except (
+                aioimaplib.Abort,
+                ConnectionError,
+                OSError,
+                asyncio.TimeoutError,
+            ) as err:
+                _LOGGER.debug(
+                    "IDLE loop exiting (%s) — _run_loop will reconnect",
+                    type(err).__name__,
+                )
+                return
+            finally:
+                # Defensive cleanup: if we're leaving the iteration with the
+                # idle Future still pending (unhandled exception during the
+                # await sequence above), cancel it explicitly to avoid
+                # "Task was destroyed but it is pending!" warnings.
+                if idle_task is not None and not idle_task.done():
+                    idle_task.cancel()
+                    try:
+                        await idle_task
+                    except (asyncio.CancelledError, aioimaplib.Abort):
+                        pass
+                    except Exception:  # noqa: BLE001
+                        pass
 
     async def _poll_loop(self) -> None:
         while self._running and self._client:
@@ -426,16 +487,6 @@ class IMAPListener:
             _LOGGER.error("Error processing uid=%s: %s", uid_s, err)
 
     # ── Parsers / helpers ───────────────────────────────────────────────
-
-    @staticmethod
-    def _flatten_lines(lines) -> str:
-        out: list[str] = []
-        for l in lines:
-            if isinstance(l, (bytes, bytearray)):
-                out.append(bytes(l).decode("utf-8", errors="ignore"))
-            elif l is not None:
-                out.append(str(l))
-        return " ".join(out)
 
     @staticmethod
     def _parse_uids(lines) -> list[int]:

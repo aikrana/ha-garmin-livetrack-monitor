@@ -2,6 +2,12 @@
 
 All notable changes to this integration will be documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-04-30
+
+### Fixed
+
+- IMAP listener no longer silently stops detecting LiveTrack emails after a network blip or long quiet period. The IDLE loop now has a 5-minute watchdog that detects half-open connections and other silent hangs, recovering automatically without needing a Home Assistant restart.
+
 ## [1.0.2] — 2026-04-25
 
 ### Changed
