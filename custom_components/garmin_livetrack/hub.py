@@ -531,9 +531,17 @@ class LiveTrackHub:
                     "in_progress", True
                 )
 
+                # Garmin only serves track-points while the session is
+                # viewable (its web client gates them the same way).  A
+                # session turns non-viewable as soon as it ends and
+                # track-points then answer 403, so don't ask.  Unknown
+                # (session call failed) → keep fetching: live data still
+                # flows when only the metadata call is down.
+                points_available = session.get("viewable") is not False
+
                 # ── 2. Track-points (throttled by device posting frequency) ─
                 now = time.time()
-                should_fetch_points = (
+                should_fetch_points = points_available and (
                     session_ended  # final fetch on session-end, ignore throttle
                     or now >= next_track_points_allowed_at
                 )

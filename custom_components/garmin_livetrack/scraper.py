@@ -3,10 +3,12 @@
 The current Garmin LiveTrack web app is a Next.js SSR site behind Cloudflare,
 serving its data over a CSRF-protected REST API.  Two endpoints are used:
 
-- ``GET /api/sessions/{sessionId}?token={token}`` — session metadata
-  (start, end, post-track-point frequency, display name, …).
+- ``GET /api/v2/sessions/{sessionId}?token={token}`` — session metadata
+  (start, end, viewable, post-track-point frequency, display name, …).
+  The v1 route ``/api/sessions/{sessionId}`` answers 405 to GET since
+  November 2026 (it only accepts DELETE now).
 - ``GET /api/sessions/{sessionId}/track-points/common?token={token}&begin=…``
-  — incremental track-points.
+  — incremental track-points (there is no v2 route for these).
 
 Both require:
 
@@ -14,18 +16,23 @@ Both require:
 - A ``livetrack-csrf-token`` UUID extracted from the ``<meta name="csrf-token">``
   tag of any HTML page on the domain.  We GET ``/`` once per scraper instance
   to discover it, and refresh it on HTTP 403.
+- The ``livetrack_csrf`` cookie set by that same GET.
 
-The CSRF is **not session-bound**: a token obtained from ``/`` works for API
-calls referencing any sessionId, and remains valid for the lifetime of the
-scraper instance unless the server invalidates it (which surfaces as 403).
+The CSRF token is not tied to a sessionId (a token obtained from ``/`` works
+for API calls referencing any sessionId), but it **is tied to the
+``livetrack_csrf`` cookie** issued with it: header without cookie, cookie
+without header, or a header from another page load all get 403.  It remains
+valid for the lifetime of the scraper instance unless the server invalidates
+it (which surfaces as 403).
 
-See ``docs/CONTEXT.md`` → "History of API Changes" for the historical phases
-(Legacy REST → GraphQL → current REST + CSRF).
+Garmin has changed this API several times (legacy REST → GraphQL → REST +
+CSRF → v2 session metadata); expect more.
 """
 from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime
 from urllib.parse import quote
 
@@ -62,15 +69,18 @@ class LiveTrackScraper:
 
         - ``start`` (ISO 8601 string) — activity start.
         - ``end`` (ISO 8601 string) — activity end (or start + 24h while live).
-        - ``in_progress`` (bool) — True while ``end == start + 86400`` (Garmin's
-          placeholder for in-flight sessions).
+        - ``in_progress`` (bool) — True until ``end`` is in the past, the same
+          rule Garmin's web client uses.  No parseable ``end`` → True.
         - ``post_track_point_frequency`` (int, seconds) — how often the device
           posts new points to Garmin's servers.  Used by callers to throttle
           ``fetch_track_points`` calls.
         - ``display_name`` (str) — the publishing user's display name.
         - ``session_name`` (str) — Garmin's auto-generated session name.
-        - ``viewable`` (bool) — whether the session is publicly viewable.
-        - ``privacy_level`` (str) — e.g. ``PUBLIC``.
+        - ``viewable`` (bool) — whether Garmin still serves the track.  It
+          turns False as soon as the session ends; track-points then answer
+          403.
+        - ``privacy_level`` (str) — first entry of ``privacyLevels``, e.g.
+          ``EVERYONE``.
 
         Returns an empty dict on hard failure (network error, 4xx other than
         403, malformed JSON).  On 403 the CSRF is refreshed and the call is
@@ -135,8 +145,9 @@ class LiveTrackScraper:
         """GET ``/`` and extract the CSRF token from the ``<meta>`` tag.
 
         Side effects: sets ``self._csrf`` (or ``None`` on failure).  Also
-        primes the cloudscraper session with the Cloudflare cookies needed
-        for subsequent ``/api/...`` calls.
+        stores the ``livetrack_csrf`` cookie the token is bound to, plus the
+        Cloudflare cookies, in the cloudscraper session used for subsequent
+        ``/api/...`` calls.
 
         Why ``/`` and not the session URL: the home page is small (~37 KB),
         constant in size (doesn't grow with activity duration), and the
@@ -173,12 +184,12 @@ class LiveTrackScraper:
         _LOGGER.debug("Discovered CSRF token from /")
 
     def _do_fetch_session(self) -> dict | None:
-        """Single GET to /api/sessions/{id}.
+        """Single GET to /api/v2/sessions/{id}.
 
         Returns parsed dict on 200, ``None`` on 403, empty dict on any other
         failure.  Callers use the ``None`` sentinel to trigger CSRF refresh.
         """
-        url = f"{_BASE}/api/sessions/{self.session_id}?token={self.token}"
+        url = f"{_BASE}/api/v2/sessions/{self.session_id}?token={self.token}"
         try:
             r = self._scraper.get(url, headers=self._headers(), timeout=15)
         except Exception as err:  # noqa: BLE001
@@ -220,19 +231,17 @@ class LiveTrackScraper:
     def _parse_session(data: dict) -> dict:
         start = data.get("start")
         end = data.get("end")
-        in_progress = False
-        if start and end:
+        # Same rule as Garmin's web client: the session has ended once `end`
+        # is in the past.  While live, Garmin keeps `end` in the future
+        # (start + 24h placeholder).  An unparseable `end` never ends it.
+        in_progress = True
+        if end:
             try:
-                s_ts = datetime.fromisoformat(
-                    start.replace("Z", "+00:00")
-                ).timestamp()
                 e_ts = datetime.fromisoformat(
                     end.replace("Z", "+00:00")
                 ).timestamp()
-                # Garmin sets end = start + 24h while the session is live.
-                # 2-second tolerance absorbs minor server-side rounding.
-                in_progress = abs(e_ts - s_ts - 86400) < 2
-            except (ValueError, TypeError):
+                in_progress = e_ts > time.time()
+            except (ValueError, TypeError, AttributeError):
                 pass
 
         post_freq = data.get("postTrackPointFrequency")
@@ -240,6 +249,12 @@ class LiveTrackScraper:
             post_freq = int(post_freq) if post_freq is not None else None
         except (ValueError, TypeError):
             post_freq = None
+
+        levels = data.get("privacyLevels")
+        privacy_level = (
+            levels[0] if isinstance(levels, list) and levels
+            else data.get("privacyLevel")
+        )
 
         return {
             "start": start,
@@ -249,7 +264,7 @@ class LiveTrackScraper:
             "display_name": data.get("userDisplayName"),
             "session_name": data.get("sessionName"),
             "viewable": data.get("viewable"),
-            "privacy_level": data.get("privacyLevel"),
+            "privacy_level": privacy_level,
         }
 
     def _points_url(self, begin: str | None = None) -> str:
@@ -266,6 +281,10 @@ class LiveTrackScraper:
         return url
 
     def _headers(self) -> dict:
+        # The CSRF header is only accepted together with the ``livetrack_csrf``
+        # cookie set by the same GET that served the token (kept in
+        # ``self._scraper``'s cookie jar).  Header alone → 403, so never send it
+        # from a different HTTP session or a stateless client.
         return {
             "accept": "application/json",
             "referer": f"{_BASE}/",

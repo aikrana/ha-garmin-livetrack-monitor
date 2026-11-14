@@ -2,6 +2,17 @@
 
 All notable changes to this integration will be documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] — 2026-11-14
+
+### Fixed
+
+- Sessions finish again when the activity ends. Garmin retired the session endpoint the integration polled, so the end was never detected and the sensor stayed `active` (and kept polling Garmin) until Home Assistant restarted or the person's next session started.
+- Track points are no longer requested once Garmin stops serving them, which it now does right after an activity ends. This removes a stream of 403 errors and retries.
+
+### Changed
+
+- The health-check script uses the new session endpoint and skips the track-points step for sessions that are no longer viewable.
+
 ## [1.0.3] — 2026-04-30
 
 ### Fixed

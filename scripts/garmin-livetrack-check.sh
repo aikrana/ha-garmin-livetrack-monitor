@@ -40,15 +40,21 @@ hdrs = {'accept':'application/json','referer':f'{BASE}/','livetrack-csrf-token':
 
 # 2. Session
 t0 = time.time()
-r = s.get(f'{BASE}/api/sessions/{sid}?token={tok}', headers=hdrs, timeout=10)
+r = s.get(f'{BASE}/api/v2/sessions/{sid}?token={tok}', headers=hdrs, timeout=10)
 ms = (time.time()-t0)*1000
 if r.status_code == 200:
     d = r.json()
     print(f'✓ Session   HTTP 200  {len(r.content)} B  {ms:.0f} ms  user={d.get("userDisplayName")!r} freq={d.get("postTrackPointFrequency")}s')
-    print(f'            start={d.get("start")}  end={d.get("end")}')
+    print(f'            start={d.get("start")}  end={d.get("end")}  viewable={d.get("viewable")}')
 else:
     print(f'✗ Session   HTTP {r.status_code}  {ms:.0f} ms  {r.text[:120]}')
     sys.exit(1)
+
+# Garmin stops serving track-points as soon as a session ends (viewable=false).
+if d.get('viewable') is False:
+    print('- Points    skipped: session no longer viewable (finished), Garmin answers 403')
+    print('\nSession endpoint OK ✓ (use a live session to check track-points)')
+    sys.exit(0)
 
 # 3. Track-points
 t0 = time.time()
