@@ -25,6 +25,10 @@ without header, or a header from another page load all get 403.  It remains
 valid for the lifetime of the scraper instance unless the server invalidates
 it (which surfaces as 403).
 
+A request that fails (network error, HTTP error, unreadable JSON) raises
+``LiveTrackRequestError`` carrying the HTTP status, so the caller can back
+off according to it.
+
 Garmin has changed this API several times (legacy REST → GraphQL → REST +
 CSRF → v2 session metadata); expect more.
 """
@@ -44,12 +48,38 @@ _BASE = "https://livetrack.garmin.com"
 _CSRF_META_RE = re.compile(rb'name="csrf-token"[^>]*content="([0-9a-f-]+)"')
 
 
+class LiveTrackRequestError(Exception):
+    """A LiveTrack request failed: network error, HTTP error or unreadable body.
+
+    ``status`` is the HTTP status (``None`` when no response came back) and
+    ``retry_after`` the server's ``Retry-After`` in seconds, if it sent one.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+
+
+def _retry_after(r) -> float | None:
+    """``Retry-After`` in seconds, when sent in its delta-seconds form."""
+    try:
+        return max(0.0, float(r.headers.get("Retry-After")))
+    except (TypeError, ValueError):
+        return None
+
+
 class LiveTrackScraper:
     """Stateful scraper for a single LiveTrack session.
 
     Holds Cloudflare cookies + CSRF token across calls.  Both ``fetch_session``
     and ``fetch_track_points`` transparently refresh the CSRF on a single 403,
-    so callers get either valid data or an empty/sentinel response without
+    so callers get either valid data or a ``LiveTrackRequestError`` without
     having to handle CSRF rotation themselves.
     """
 
@@ -82,51 +112,46 @@ class LiveTrackScraper:
         - ``privacy_level`` (str) — first entry of ``privacyLevels``, e.g.
           ``EVERYONE``.
 
-        Returns an empty dict on hard failure (network error, 4xx other than
-        403, malformed JSON).  On 403 the CSRF is refreshed and the call is
-        retried once before giving up.
+        On 403 the CSRF is refreshed and the call is retried once.  Raises
+        ``LiveTrackRequestError`` when the call (or the CSRF discovery) still
+        fails: network error, HTTP error, malformed JSON.
         """
         self._ensure_scraper()
         if self._csrf is None:
             self._fetch_csrf()
-            if self._csrf is None:
-                return {}
 
         result = self._do_fetch_session()
         if result is None:  # 403 sentinel
             _LOGGER.debug("Session 403 → refreshing CSRF and retrying")
             self._fetch_csrf()
-            if self._csrf is None:
-                return {}
             result = self._do_fetch_session()
             if result is None:
-                _LOGGER.warning("Session still 403 after CSRF refresh")
-                return {}
+                raise LiveTrackRequestError(
+                    "Session still 403 after CSRF refresh", 403
+                )
         return result
 
     def fetch_track_points(self, begin: str | None = None) -> list:
         """Fetch track-points (optionally only those after ``begin``).
 
-        Returns a list of point dicts.  Empty list on any failure mode
-        (network error, 4xx other than 403, malformed JSON, no points yet).
-        On 403 the CSRF is refreshed and the call is retried once.
+        Returns a list of point dicts, empty when there are no new points.
+        On 403 the CSRF is refreshed and the call is retried once.  Raises
+        ``LiveTrackRequestError`` when the call (or the CSRF discovery) still
+        fails: network error, HTTP error, malformed JSON.
         """
         self._ensure_scraper()
         if self._csrf is None:
             self._fetch_csrf()
-            if self._csrf is None:
-                return []
 
         points = self._do_fetch_track_points(begin)
         if points is None:  # 403 sentinel
             _LOGGER.debug("Track-points 403 → refreshing CSRF and retrying")
             self._fetch_csrf()
-            if self._csrf is None:
-                return []
             points = self._do_fetch_track_points(begin)
             if points is None:
-                _LOGGER.warning("Track-points still 403 after CSRF refresh")
-                return []
+                raise LiveTrackRequestError(
+                    "Track-points still 403 after CSRF refresh", 403
+                )
         return points
 
     def close(self) -> None:
@@ -144,10 +169,11 @@ class LiveTrackScraper:
     def _fetch_csrf(self) -> None:
         """GET ``/`` and extract the CSRF token from the ``<meta>`` tag.
 
-        Side effects: sets ``self._csrf`` (or ``None`` on failure).  Also
-        stores the ``livetrack_csrf`` cookie the token is bound to, plus the
-        Cloudflare cookies, in the cloudscraper session used for subsequent
-        ``/api/...`` calls.
+        Side effects: sets ``self._csrf``; on failure it is cleared and
+        ``LiveTrackRequestError`` is raised.  Also stores the
+        ``livetrack_csrf`` cookie the token is bound to, plus the Cloudflare
+        cookies, in the cloudscraper session used for subsequent ``/api/...``
+        calls.
 
         Why ``/`` and not the session URL: the home page is small (~37 KB),
         constant in size (doesn't grow with activity duration), and the
@@ -159,26 +185,25 @@ class LiveTrackScraper:
         try:
             r = self._scraper.get(f"{_BASE}/", timeout=15)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("CSRF discovery request error: %s", err)
             self._csrf = None
-            return
+            raise self._network_error("CSRF discovery", err) from err
 
         if r.status_code != 200:
-            _LOGGER.warning(
-                "CSRF discovery returned HTTP %s (expected 200)", r.status_code
-            )
             self._csrf = None
-            return
+            raise LiveTrackRequestError(
+                f"CSRF discovery returned HTTP {r.status_code} (expected 200)",
+                r.status_code,
+                _retry_after(r),
+            )
 
         m = _CSRF_META_RE.search(r.content)
         if not m:
-            _LOGGER.warning(
-                "CSRF token meta tag not found at %s/  — Garmin may have "
-                "changed the page layout",
-                _BASE,
-            )
             self._csrf = None
-            return
+            raise LiveTrackRequestError(
+                f"CSRF token meta tag not found at {_BASE}/ — Garmin may "
+                "have changed the page layout",
+                r.status_code,
+            )
 
         self._csrf = m.group(1).decode("ascii")
         _LOGGER.debug("Discovered CSRF token from /")
@@ -186,46 +211,69 @@ class LiveTrackScraper:
     def _do_fetch_session(self) -> dict | None:
         """Single GET to /api/v2/sessions/{id}.
 
-        Returns parsed dict on 200, ``None`` on 403, empty dict on any other
-        failure.  Callers use the ``None`` sentinel to trigger CSRF refresh.
+        Returns parsed dict on 200 and ``None`` on 403 (callers use the
+        sentinel to trigger a CSRF refresh); raises
+        ``LiveTrackRequestError`` on any other failure.
+
+        Asks for an uncompressed body: Garmin labels this route's JSON error
+        bodies ``Content-Encoding: gzip`` without compressing them, and the
+        decoding error would hide the HTTP status.
         """
         url = f"{_BASE}/api/v2/sessions/{self.session_id}?token={self.token}"
+        headers = {**self._headers(), "accept-encoding": "identity"}
         try:
-            r = self._scraper.get(url, headers=self._headers(), timeout=15)
+            r = self._scraper.get(url, headers=headers, timeout=15)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Session request error: %s", err)
-            return {}
+            raise self._network_error("Session", err) from err
 
         if r.status_code == 200:
             try:
                 data = r.json()
             except ValueError as err:
-                _LOGGER.warning("Session JSON parse error: %s", err)
-                return {}
+                raise LiveTrackRequestError(
+                    f"Session JSON parse error: {err}", r.status_code
+                ) from err
             return self._parse_session(data)
         if r.status_code == 403:
             return None
-        _LOGGER.warning("Session returned HTTP %s", r.status_code)
-        return {}
+        raise LiveTrackRequestError(
+            f"Session returned HTTP {r.status_code}",
+            r.status_code,
+            _retry_after(r),
+        )
 
     def _do_fetch_track_points(self, begin: str | None) -> list | None:
         url = self._points_url(begin)
         try:
             r = self._scraper.get(url, headers=self._headers(), timeout=15)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Track-points request error: %s", err)
-            return []
+            raise self._network_error("Track-points", err) from err
 
         if r.status_code == 200:
             try:
                 return r.json().get("trackPoints", [])
             except ValueError as err:
-                _LOGGER.warning("Track-points JSON parse error: %s", err)
-                return []
+                raise LiveTrackRequestError(
+                    f"Track-points JSON parse error: {err}", r.status_code
+                ) from err
         if r.status_code == 403:
             return None
-        _LOGGER.warning("Track-points returned HTTP %s", r.status_code)
-        return []
+        raise LiveTrackRequestError(
+            f"Track-points returned HTTP {r.status_code}",
+            r.status_code,
+            _retry_after(r),
+        )
+
+    def _network_error(self, what: str, err: Exception) -> LiveTrackRequestError:
+        """Wrap a request that got no response.
+
+        The exception text often embeds the request URL, so only its type
+        goes into the error and the full text, minus the token, to DEBUG.
+        """
+        _LOGGER.debug(
+            "%s request error: %s", what, str(err).replace(self.token, "<token>")
+        )
+        return LiveTrackRequestError(f"{what} request error: {type(err).__name__}")
 
     @staticmethod
     def _parse_session(data: dict) -> dict:

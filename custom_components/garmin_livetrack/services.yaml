@@ -1,0 +1,21 @@
+start_tracking:
+  fields:
+    person:
+      required: true
+      example: john
+      selector:
+        text:
+    url:
+      required: true
+      example: "https://livetrack.garmin.com/session/1a2b3c4d-0000-4000-8000-000000000000/token/ABCDEF0123456789"
+      selector:
+        text:
+          type: url
+
+stop_tracking:
+  fields:
+    person:
+      required: true
+      example: john
+      selector:
+        text:

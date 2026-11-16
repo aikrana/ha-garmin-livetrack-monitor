@@ -124,19 +124,9 @@ class LiveTrackDeviceTracker(TrackerEntity):
             return state.longitude
         return None
 
-    @property
-    def location_name(self) -> str | None:
-        state = self._hub.get_state(self._person_id)
-        if not state or state.state != STATE_ACTIVE:
-            return None
-        activity_names = {
-            "hiking": "Hiking",
-            "walking": "Walking",
-            "cycling": "Cycling",
-            "running": "Running",
-            "kayak": "Kayaking",
-        }
-        return activity_names.get(state.activity_type, "Activity")
+    # No location_name: Home Assistant drops it in 2027.7, so the state is
+    # always the zone (home / not_home / zone name) worked out from the
+    # coordinates.  The activity type is in the attributes instead.
 
     @property
     def extra_state_attributes(self) -> dict:

@@ -22,6 +22,7 @@ Provider-agnostic IMAP monitoring.  Design choices:
 from __future__ import annotations
 
 import asyncio
+import base64
 import email
 import email.policy
 import logging
@@ -76,6 +77,63 @@ def _normalize_for_match(text: str) -> str:
     nfkd = unicodedata.normalize("NFKD", text)
     stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
     return stripped.lower()
+
+
+def imap_mailbox(folder: str) -> str:
+    """Return ``folder`` as an IMAP mailbox argument (RFC 3501).
+
+    aioimaplib sends the argument verbatim, so the name is always quoted
+    (spaces and the ``/`` or ``.`` hierarchy separators then just work) and
+    non-ASCII characters use the modified UTF-7 of RFC 3501 §5.1.3
+    ("Notificación" → ``Notificaci&APM-n``).  Surrounding quotes typed by
+    the user are dropped; an empty name means INBOX.
+    """
+    name = folder.strip()
+    if len(name) >= 2 and name[0] == name[-1] == '"':
+        name = name[1:-1]
+    name = name or "INBOX"
+
+    encoded: list[str] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        if pending:
+            b64 = base64.b64encode("".join(pending).encode("utf-16-be"))
+            encoded.append(
+                "&" + b64.decode("ascii").rstrip("=").replace("/", ",") + "-"
+            )
+            pending.clear()
+
+    for ch in name:
+        if " " <= ch <= "~":
+            flush()
+            encoded.append("&-" if ch == "&" else ch)
+        else:
+            pending.append(ch)
+    flush()
+
+    quoted = "".join(encoded).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{quoted}"'
+
+
+def parse_livetrack_link(text: str) -> tuple[str | None, str | None]:
+    """Return the session id and token of the first LiveTrack link in ``text``.
+
+    Works on a plain URL as well as on a quoted-printable email body (its
+    soft line breaks are removed first).  ``(None, None)`` when there is
+    no link.
+    """
+    cleaned = text.replace("=\n", "").replace("=\r\n", "").replace("=\r", "")
+    m = re.search(LIVETRACK_URL_REGEX, cleaned, re.IGNORECASE)
+    if not m:
+        return None, None
+    session_id = (
+        m.group(1).replace("\n", "").replace("\r", "").replace("=", "")
+    )
+    token = (
+        m.group(2).replace("\n", "").replace("\r", "").replace("=", "")
+    )
+    return session_id, token
 
 
 class IMAPListener:
@@ -199,7 +257,7 @@ class IMAPListener:
                 "IDLE capability advertised by server: %s", self._supports_idle
             )
 
-            resp = await self._client.select(self._folder)
+            resp = await self._client.select(imap_mailbox(self._folder))
             if resp.result != "OK":
                 _LOGGER.error("IMAP select failed: %s", resp.lines)
                 return False
@@ -458,7 +516,7 @@ class IMAPListener:
             if not body:
                 return
 
-            session_id, token = self._extract_livetrack_link(body)
+            session_id, token = parse_livetrack_link(body)
             if not session_id:
                 _LOGGER.debug(
                     "uid=%s: no LiveTrack URL in body (first 200 chars: %r)",
@@ -576,20 +634,6 @@ class IMAPListener:
                 body_parts.append(payload.decode(charset, errors="ignore"))
         return "\n".join(body_parts)
 
-    @staticmethod
-    def _extract_livetrack_link(body: str) -> tuple[str | None, str | None]:
-        cleaned = body.replace("=\n", "").replace("=\r\n", "").replace("=\r", "")
-        m = re.search(LIVETRACK_URL_REGEX, cleaned, re.IGNORECASE)
-        if not m:
-            return None, None
-        session_id = (
-            m.group(1).replace("\n", "").replace("\r", "").replace("=", "")
-        )
-        token = (
-            m.group(2).replace("\n", "").replace("\r", "").replace("=", "")
-        )
-        return session_id, token
-
     def _match_person(self, body: str) -> str | None:
         body_normalized = _normalize_for_match(body)
         for i, name_normalized in enumerate(self._person_names_normalized):
@@ -676,7 +720,7 @@ async def test_imap_connection(
 
     # Phase 3: select folder.
     try:
-        resp = await client.select(folder)
+        resp = await client.select(imap_mailbox(folder))
     except Exception as err:  # noqa: BLE001
         _LOGGER.info("IMAP folder select exception: %s", err)
         await _safe_logout(client)
@@ -688,7 +732,7 @@ async def test_imap_connection(
         await _safe_logout(client)
         return "imap_folder_error"
 
-    _safe_logout(client)
+    await _safe_logout(client)
     return None
 
 

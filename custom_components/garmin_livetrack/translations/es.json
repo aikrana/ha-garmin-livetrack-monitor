@@ -2,6 +2,14 @@
     "config": {
         "step": {
             "user": {
+                "title": "¿Cómo se detectan las sesiones?",
+                "description": "Garmin envía un email con un enlace de LiveTrack cada vez que alguien comparte una actividad. La integración puede vigilar tu bandeja de entrada en busca de esos emails, o puedes iniciar tú cada sesión con la acción `garmin_livetrack.start_tracking` (desde una automatización, un script o Herramientas para desarrolladores).",
+                "menu_options": {
+                    "imap": "Con los emails de Garmin (IMAP)",
+                    "manual": "Manualmente, con una acción (sin cuenta de email)"
+                }
+            },
+            "imap": {
                 "title": "Conexión IMAP",
                 "description": "Configura el servidor IMAP que recibe los emails de notificación de Garmin LiveTrack.",
                 "data": {
@@ -9,12 +17,16 @@
                     "imap_port": "Puerto",
                     "imap_username": "Usuario (email)",
                     "imap_password": "Contraseña (se recomienda contraseña de app)",
+                    "imap_folder": "Carpeta",
                     "email_max_age_minutes": "Ignorar emails más antiguos de (minutos)"
+                },
+                "data_description": {
+                    "imap_folder": "Carpeta a la que llegan los emails de Garmin, tal como la muestra tu cliente de correo: INBOX, o una subcarpeta como INBOX/Garmin (INBOX.Garmin en algunos servidores). Las etiquetas de Gmail funcionan por su nombre."
                 }
             },
             "person": {
                 "title": "Añadir persona",
-                "description": "Añade la primera persona a monitorizar. Puedes añadir más después en las opciones de la integración.\n\nEl **nombre completo** debe coincidir exactamente con el que aparece en el cuerpo del email de Garmin LiveTrack.\nEl **prefijo de entidad** se usa para crear los IDs de las entidades (ej. 'juan' → sensor.garmin_livetrack_juan).",
+                "description": "Añade la primera persona a monitorizar. Puedes añadir más después en las opciones de la integración.\n\nSi las sesiones llegan por email, el **nombre completo** debe coincidir exactamente con el que aparece en el cuerpo del email de Garmin LiveTrack.\nEl **prefijo de entidad** se usa para crear los IDs de las entidades (ej. 'juan' → sensor.garmin_livetrack_juan) y para indicar la persona en las acciones.",
                 "data": {
                     "name": "Nombre completo (como en el email)",
                     "entity_prefix": "Prefijo de entidad (ej. juan)",
@@ -44,7 +56,8 @@
                 "menu_options": {
                     "add_person": "Añadir persona",
                     "remove_person": "Eliminar persona",
-                    "settings": "Ajustes generales"
+                    "settings": "Ajustes generales",
+                    "email": "Ajustes de email"
                 }
             },
             "add_person": {
@@ -64,13 +77,67 @@
                 "title": "Ajustes generales",
                 "data": {
                     "enable_device_tracker": "Crear entidades device tracker",
-                    "poll_interval": "Intervalo de sondeo (segundos)",
+                    "poll_interval": "Intervalo de sondeo (segundos)"
+                }
+            },
+            "email": {
+                "title": "Ajustes de email",
+                "description": "Antes de guardar una carpeta nueva se comprueba en el servidor IMAP.",
+                "data": {
+                    "imap_folder": "Carpeta",
                     "email_max_age_minutes": "Ignorar emails más antiguos de (minutos)"
+                },
+                "data_description": {
+                    "imap_folder": "Carpeta a la que llegan los emails de Garmin, tal como la muestra tu cliente de correo: INBOX, o una subcarpeta como INBOX/Garmin (INBOX.Garmin en algunos servidores). Las etiquetas de Gmail funcionan por su nombre."
                 }
             }
         },
+        "error": {
+            "imap_dns_error": "No se pudo resolver el nombre del servidor IMAP. Revisa la dirección del servidor.",
+            "imap_connection_error": "No se pudo conectar al servidor IMAP. Puede estar apagado, bloqueado por un firewall, o el puerto es incorrecto.",
+            "imap_tls_error": "Fallo en el handshake SSL/TLS. Revisa el puerto (normalmente 993) y que el servidor soporte SSL implícito.",
+            "imap_auth_error": "Las credenciales IMAP han sido rechazadas. Revisa usuario y contraseña. En Gmail, usa una App Password en vez de tu contraseña normal.",
+            "imap_folder_error": "No se pudo abrir la carpeta IMAP. Comprueba que el nombre existe (por defecto: INBOX).",
+            "imap_unknown_error": "El test IMAP falló con un error inesperado. Consulta los logs de Home Assistant para más detalles.",
+            "invalid_prefix": "El prefijo de entidad solo puede contener letras, números y guiones bajos.",
+            "duplicate_prefix": "Este prefijo de entidad ya está en uso."
+        },
         "abort": {
             "no_persons": "No hay personas para eliminar."
+        }
+    },
+    "services": {
+        "start_tracking": {
+            "name": "Iniciar seguimiento",
+            "description": "Empieza a seguir una sesión de Garmin LiveTrack de una persona, igual que si acabara de llegar su email. Si ya había una sesión en curso para esa persona, la sustituye.",
+            "fields": {
+                "person": {
+                    "name": "Persona",
+                    "description": "Prefijo de entidad (ej. juan) o nombre completo de una persona configurada."
+                },
+                "url": {
+                    "name": "Enlace de LiveTrack",
+                    "description": "El enlace de la sesión: https://livetrack.garmin.com/session/…/token/…"
+                }
+            }
+        },
+        "stop_tracking": {
+            "name": "Detener seguimiento",
+            "description": "Termina la sesión en curso de la persona como si Garmin la hubiera terminado: el sensor pasa a finished y se lanza garmin_livetrack_activity_ended. No hace nada si no hay ninguna sesión en curso.",
+            "fields": {
+                "person": {
+                    "name": "Persona",
+                    "description": "Prefijo de entidad (ej. juan) o nombre completo de una persona configurada."
+                }
+            }
+        }
+    },
+    "exceptions": {
+        "unknown_person": {
+            "message": "Ninguna persona configurada coincide con \"{person}\". Usa el prefijo de entidad o el nombre completo que figura en las opciones de la integración."
+        },
+        "invalid_url": {
+            "message": "No es un enlace de sesión de Garmin LiveTrack (https://livetrack.garmin.com/session/…/token/…)."
         }
     }
 }

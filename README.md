@@ -17,7 +17,8 @@ This integration encapsulates all of that complexity internally. When Garmin mak
 
 ## Features
 
-- **Automatic session detection** — monitors your email inbox via IMAP IDLE push for LiveTrack notification emails; no manual input or polling needed.
+- **Automatic session detection** — monitors your email inbox (any folder) via IMAP IDLE push for LiveTrack notification emails; no manual input or polling needed.
+- **Or start sessions yourself** — no email account needed: pass a LiveTrack link to the `garmin_livetrack.start_tracking` action from an automation, a script or Developer Tools.
 - **Real-time activity data** — position, speed, altitude, heart rate, distance, duration, cadence, power and more, updated every few seconds during an active session.
 - **Multi-person support** — configure several people and monitor concurrent sessions independently.
 - **Sensor per person** — state (`idle` / `active` / `finished`) with rich attributes containing all available activity data.
@@ -41,18 +42,27 @@ This integration encapsulates all of that complexity internally. When Garmin mak
 
 ## Prerequisites
 
-This integration monitors an email inbox for Garmin LiveTrack notification emails. For this to work:
+To detect sessions automatically, the integration monitors an email inbox for Garmin LiveTrack notification emails. For this to work:
 
 - You need an email account accessible via IMAP (Gmail, Outlook, or any provider that supports IMAP with IDLE).
 - The people you want to monitor must have configured Garmin LiveTrack to send notification emails **to that email address** when they start an activity. This is done from the Garmin Connect app on their phone or watch, where they add your email as a LiveTrack recipient.
 - For Gmail, you will need to generate an [App Password](https://myaccount.google.com/apppasswords) rather than using your regular password.
+
+Without an email account you can still use the integration in manual mode and start each session with the [`start_tracking` action](#actions).
 
 ## Setup
 
 1. Go to **Settings → Devices & Services → Add Integration**
 2. Search for **Garmin LiveTrack Monitor**
 
-### Step 1 — IMAP Connection
+### Step 1 — How sessions are found
+
+- **From the Garmin emails (IMAP)** — sessions start automatically; continue with step 2.
+- **Manually, with an action** — no email account; go straight to step 3 and start sessions with [`garmin_livetrack.start_tracking`](#actions).
+
+To switch between the two later, remove the integration and add it again.
+
+### Step 2 — IMAP Connection
 
 | Field | Example |
 |-------|---------|
@@ -60,16 +70,17 @@ This integration monitors an email inbox for Garmin LiveTrack notification email
 | Port | `993` |
 | Username | `your.email@gmail.com` |
 | Password | Your app password |
+| Folder | `INBOX` (default), or a subfolder such as `INBOX/Garmin` |
 | Ignore emails older than | `5` minutes |
 
-The "ignore emails older than" setting prevents the integration from reacting to old LiveTrack emails that may already be in your inbox when Home Assistant starts up.
+The folder is the one your mail client shows; use it if a filter moves the Garmin emails out of the inbox. Subfolders are written with the server's separator (`INBOX/Garmin`, or `INBOX.Garmin` on some servers), and Gmail labels work by name. The "ignore emails older than" setting prevents the integration from reacting to old LiveTrack emails that may already be in your inbox when Home Assistant starts up.
 
-### Step 2 — First Person
+### Step 3 — First Person
 
 | Field | Description |
 |-------|-------------|
 | Full name | The person's name exactly as it appears in the LiveTrack email body (e.g. `John Smith`) |
-| Entity prefix | Short identifier used in entity names (e.g. `john` creates `sensor.garmin_livetrack_john`) |
+| Entity prefix | Short identifier used in entity names (e.g. `john` creates `sensor.garmin_livetrack_john`) and in actions |
 | Enable device tracker | Creates a `device_tracker` entity for use with HA's Person integration and the map |
 | Poll interval | Seconds between data updates (default: 6) |
 
@@ -116,7 +127,9 @@ Only created when the device tracker option is enabled in the integration settin
 
 In Home Assistant, device tracker entities represent the location of a device or person. They can be associated with a [Person](https://www.home-assistant.io/integrations/person/) entity under **Settings → People**, alongside other trackers like your phone's companion app or router-based presence detection. HA combines all associated trackers to determine the person's overall location, prioritizing the most recently updated source.
 
-During active sessions, the LiveTrack device tracker reports the activity coordinates and will reflect zone names (e.g. `home`, `not_home`, or a custom zone) just like any other tracker. It also includes speed, altitude, heart rate, distance, duration and activity type as attributes.
+During active sessions, the LiveTrack device tracker reports the activity coordinates, and its state is the zone (`home`, `not_home`, or a custom zone) just like any other tracker. It also includes speed, altitude, heart rate, distance, duration and activity type as attributes.
+
+> **Changed in 1.1.0:** until 1.0.4 the tracker's state was the activity name (e.g. `Running`) while a session was active. Home Assistant stops supporting that in 2027.7, so the state is now always the zone. Use the `activity_type` attribute, or the sensor's `active` state, in automations that used to check for the activity name.
 
 > **Tip — avoiding location conflicts with your phone:** If both your phone and the LiveTrack device tracker are associated with the same Person, your phone's less accurate location updates (especially when it's in a pocket without navigation active) can interfere, causing the person's position to jump back and forth. A practical solution is to temporarily swap the trackers during an active session using the `person.add_device_tracker` and `person.remove_device_tracker` services provided by [Spook](https://spook.boo/person/). You can automate this by listening for `garmin_livetrack_activity_started` and `garmin_livetrack_activity_ended` events.
 
@@ -126,7 +139,7 @@ All events include `person_id` and `person_name` in the payload.
 
 | Event | Fired when | Additional payload |
 |-------|------------|-------------------|
-| `garmin_livetrack_activity_started` | LiveTrack email detected, monitoring begins | `session_id`, `livetrack_url` |
+| `garmin_livetrack_activity_started` | LiveTrack email detected (or `start_tracking` called), monitoring begins | `session_id`, `livetrack_url` |
 | `garmin_livetrack_activity_detected` | First data point reveals the activity type | `activity_type`, `datetime` |
 | `garmin_livetrack_point_received` | A new data point arrives | Full point data: coordinates, speed, altitude, heart rate, distance, duration, activity type, session ID, and all other available fields |
 | `garmin_livetrack_activity_ended` | Session finishes | `activity_type`, `duration`, `distance_km`, last known coordinates, `session_id` |
@@ -166,18 +179,36 @@ automation:
             ❤️ {{ trigger.event.data.heartrate }} bpm
 ```
 
+## Actions
+
+`person` accepts the entity prefix (`john`) or the full name of a tracked person. Both actions work in email and in manual mode.
+
+| Action | What it does |
+|--------|--------------|
+| `garmin_livetrack.start_tracking` | Starts following the session of a LiveTrack link for that person, exactly as if its email had just arrived (`garmin_livetrack_activity_started` fires). A session already running for the person is replaced. |
+| `garmin_livetrack.stop_tracking` | Ends the person's running session as if Garmin had ended it: the sensor goes to `finished` and `garmin_livetrack_activity_ended` fires. Does nothing if no session is running. |
+
+```yaml
+action: garmin_livetrack.start_tracking
+data:
+  person: john
+  url: "https://livetrack.garmin.com/session/<session id>/token/<token>"
+```
+
+The link can come from anywhere — for instance from Home Assistant's own [IMAP integration](https://www.home-assistant.io/integrations/imap/), a Telegram message or a dashboard text field — as long as it is a `https://livetrack.garmin.com/session/…/token/…` link.
+
 ## State behavior
 
 | Situation | Sensor state | Attributes |
 |-----------|-------------|------------|
 | Home Assistant starts up | `idle` | Empty |
-| LiveTrack email arrives | `active` | Cleared — no stale data from previous sessions |
+| LiveTrack email arrives (or `start_tracking` is called) | `active` | Cleared — no stale data from previous sessions |
 | First data point with coordinates | `active` | Populated, `has_location: true` |
 | Active session, no GPS fix yet | `active` | Partial data, `has_location: false` |
 | Session ends | `finished` | Last known values preserved |
 | New session starts for same person | `active` | Cleared and repopulated |
 
-Session state is not persisted across Home Assistant restarts. Every entity returns to `idle` on startup, and an **in-progress** activity that was being tracked before the restart is **not resumed** — the integration only reacts to new notification emails that arrive after it has started. This is a deliberate trade-off: the IMAP listener establishes a UID watermark on startup and skips every message that was already in the inbox, which prevents old LiveTrack emails (from previous sessions or HA downtime) from accidentally triggering fresh tracking.
+Session state is not persisted across Home Assistant restarts. Every entity returns to `idle` on startup, and an **in-progress** activity that was being tracked before the restart is **not resumed** — the integration only reacts to new notification emails that arrive after it has started. This is a deliberate trade-off: the IMAP listener establishes a UID watermark on startup and skips every message that was already in the inbox, which prevents old LiveTrack emails (from previous sessions or HA downtime) from accidentally triggering fresh tracking. To pick up a session that was running during a restart, call `start_tracking` with its link.
 
 ## Managing tracked people
 
@@ -185,7 +216,13 @@ Go to the integration entry in **Settings → Devices & Services**, click **Conf
 
 - **Add tracked person** — provide their full name as it appears in the Garmin email and choose an entity prefix
 - **Remove tracked person** — select from the configured list
-- **General settings** — toggle device tracker, adjust poll interval, change email age threshold
+- **General settings** — toggle device tracker, adjust poll interval
+- **Email settings** (email mode only) — change the IMAP folder (checked against the server before saving) and the email age threshold
+
+## Known limitations
+
+- **The LiveTrack page can't be embedded.** Garmin's LiveTrack web page no longer loads inside an iframe — a Webpage/iframe dashboard card, or a dashboard cast to a Nest Hub that embeds it, spins forever or says the session is private. Since September 2026 the page depends on a cookie that browsers don't send to pages embedded from another site. Open `livetrack_url` in a browser tab or from a notification instead, or show the person on a [Map card](https://www.home-assistant.io/dashboards/map/) with the device tracker.
+- **Passcode-protected sessions aren't supported.** If the person protects their LiveTrack sessions with an access code, the integration can't read them.
 
 ## Troubleshooting
 
@@ -194,14 +231,16 @@ Go to the integration entry in **Settings → Devices & Services**, click **Conf
 - For Gmail, ensure you're using an [App Password](https://myaccount.google.com/apppasswords)
 - Confirm that the person's full name is spelled exactly as Garmin sends it in the email body
 - Make sure your email account is listed as a LiveTrack recipient in the person's Garmin Connect settings
+- If a mail filter moves the Garmin emails to another folder, set that folder in **Configure → Email settings**
 
 **Sensors stay in `idle`:**
 - Check logs at **Settings → System → Logs**, filter by `garmin_livetrack`
 - Look for "IMAP listener started" to confirm the email monitor is running
 
 **Data stops updating during a session:**
-- The integration automatically retries and recovers from transient errors
-- Check logs for persistent error messages
+- The integration automatically retries and recovers from transient errors. While Garmin keeps failing it waits longer between attempts (up to 5 minutes, 15 if Garmin asks it to slow down)
+- Check logs for `Garmin request failed`: it is logged once per failure streak
+- If the session is stuck, end it with `garmin_livetrack.stop_tracking`
 
 ## License
 

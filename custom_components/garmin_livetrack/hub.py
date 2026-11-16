@@ -58,6 +58,7 @@ from .const import (
     CONF_POLL_INTERVAL,
     CONF_SENDER,
     DEFAULT_EMAIL_MAX_AGE,
+    DEFAULT_IMAP_FOLDER,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_POST_TRACK_POINT_FREQUENCY,
     DOMAIN,
@@ -70,7 +71,7 @@ from .const import (
     STATE_IDLE,
 )
 from .imap_listener import IMAPListener
-from .scraper import LiveTrackScraper
+from .scraper import LiveTrackRequestError, LiveTrackScraper
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,6 +83,30 @@ SIGNAL_SESSION_CHANGE = f"{DOMAIN}_session_change"
 # (6 → 12 → 24 → 48 → 96 → 192 → 300).  A very long ride with a flaky
 # connection will retry at 5-minute intervals until the session ends.
 SCRAPER_BACKOFF_MAX = 300
+
+# Backoff while Garmin rate-limits us (HTTP 429): start at one minute and
+# double up to 15 minutes, or wait as long as its Retry-After asks (same cap).
+RATE_LIMIT_BACKOFF_MIN = 60
+RATE_LIMIT_BACKOFF_MAX = 900
+
+
+def _backoff_delay(
+    failures: list[LiveTrackRequestError], attempt: int, poll_interval: float
+) -> float:
+    """Seconds to wait after the ``attempt``-th failed poll in a row.
+
+    Doubles from ``poll_interval`` up to ``SCRAPER_BACKOFF_MAX``, or from
+    ``RATE_LIMIT_BACKOFF_MIN`` up to ``RATE_LIMIT_BACKOFF_MAX`` when one of
+    the failures is a 429.  Never shorter than a ``Retry-After`` the server
+    sent, within the same cap.
+    """
+    if any(f.status == 429 for f in failures):
+        base, cap = RATE_LIMIT_BACKOFF_MIN, RATE_LIMIT_BACKOFF_MAX
+    else:
+        base, cap = poll_interval, SCRAPER_BACKOFF_MAX
+    delay = min(base * 2 ** (attempt - 1), cap)
+    retry_after = max((f.retry_after or 0 for f in failures), default=0)
+    return max(delay, min(retry_after, cap))
 
 
 @dataclass
@@ -266,6 +291,8 @@ class LiveTrackHub:
         self.hass = hass
         self.config_entry = config_entry
         self._imap: IMAPListener | None = None
+        # (folder, max email age) the running IMAP listener was built with
+        self._imap_config: tuple[str, int] | None = None
         self._persons: dict[str, PersonConfig] = {}
         self._states: dict[str, PersonState] = {}
         self._scrapers: dict[str, LiveTrackScraper] = {}
@@ -335,23 +362,41 @@ class LiveTrackHub:
             data.get(CONF_ENABLE_DEVICE_TRACKER, False),
         )
 
-        person_names = [p.name for p in self._persons.values()]
-        self._imap = IMAPListener(
+        # Entries set up in manual mode have no IMAP settings: sessions then
+        # only start through the start_tracking service.
+        if CONF_IMAP_SERVER in data:
+            self._imap = self._create_imap_listener()
+            await self._imap.start()
+
+    def _imap_settings(self) -> tuple[str, int]:
+        """Folder and max email age to use (options override setup data)."""
+        data = self.config_entry.data
+        options = self.config_entry.options
+        return (
+            options.get(
+                CONF_IMAP_FOLDER, data.get(CONF_IMAP_FOLDER, DEFAULT_IMAP_FOLDER)
+            ),
+            options.get(
+                CONF_EMAIL_MAX_AGE,
+                data.get(CONF_EMAIL_MAX_AGE, DEFAULT_EMAIL_MAX_AGE),
+            ),
+        )
+
+    def _create_imap_listener(self) -> IMAPListener:
+        data = self.config_entry.data
+        folder, max_age = self._imap_config = self._imap_settings()
+        return IMAPListener(
             hass=self.hass,
             server=data[CONF_IMAP_SERVER],
             port=data[CONF_IMAP_PORT],
             username=data[CONF_IMAP_USERNAME],
             password=data[CONF_IMAP_PASSWORD],
-            folder=data.get(CONF_IMAP_FOLDER, "INBOX"),
+            folder=folder,
             sender=data.get(CONF_SENDER, "noreply@garmin.com"),
-            person_names=person_names,
-            max_age_minutes=options.get(
-                CONF_EMAIL_MAX_AGE,
-                data.get(CONF_EMAIL_MAX_AGE, DEFAULT_EMAIL_MAX_AGE),
-            ),
+            person_names=[p.name for p in self._persons.values()],
+            max_age_minutes=max_age,
             callback=self._on_livetrack_email,
         )
-        await self._imap.start()
 
     async def async_shutdown(self) -> None:
         if self._imap:
@@ -389,35 +434,44 @@ class LiveTrackHub:
             CONF_ENABLE_DEVICE_TRACKER, False
         )
 
-        if self._imap:
+        if self._imap and self._imap_settings() != self._imap_config:
+            # Folder or max email age changed: reconnect with the new values.
+            await self._imap.stop()
+            self._imap = self._create_imap_listener()
+            await self._imap.start()
+        elif self._imap:
             self._imap.update_person_names(
                 [p.name for p in self._persons.values()]
             )
 
         async_dispatcher_send(self.hass, SIGNAL_SESSION_CHANGE)
 
-    # ── IMAP callback ────────────────────────────────────────────────────
+    # ── Session control (IMAP callback and services) ─────────────────────
 
-    async def _on_livetrack_email(
+    def find_person(self, person: str) -> str | None:
+        """Return the id of the person whose entity prefix or full name is
+        ``person`` (case-insensitive), or None."""
+        wanted = person.strip().casefold()
+        for pid, cfg in self._persons.items():
+            if wanted in (pid.casefold(), cfg.name.strip().casefold()):
+                return pid
+        return None
+
+    async def async_start_tracking(
         self,
+        person_id: str,
         session_id: str,
         token: str,
-        person_name: str,
         livetrack_url: str,
     ) -> None:
-        person_id = None
-        for pid, cfg in self._persons.items():
-            if cfg.name.lower() == person_name.lower():
-                person_id = pid
-                break
-        if person_id is None:
-            _LOGGER.warning(
-                "Matched person name '%s' but no config found", person_name
-            )
-            return
+        """Follow a LiveTrack session for a configured person.
 
+        Replaces the person's running session, if any.  Used for sessions
+        found in email and by the ``start_tracking`` service.
+        """
+        cfg = self._persons[person_id]
         _LOGGER.info(
-            "Starting session for %s (session=%s)", person_name, session_id
+            "Starting session for %s (session=%s)", cfg.name, session_id
         )
 
         await self._stop_tracking(person_id)
@@ -438,10 +492,41 @@ class LiveTrackHub:
             EVENT_ACTIVITY_STARTED,
             {
                 ATTR_PERSON_ID: person_id,
-                ATTR_PERSON_NAME: person_name,
+                ATTR_PERSON_NAME: cfg.name,
                 ATTR_SESSION_ID: session_id,
                 ATTR_LIVETRACK_URL: livetrack_url,
             },
+        )
+
+    async def async_stop_tracking(self, person_id: str) -> None:
+        """End a person's running session as if Garmin had ended it.
+
+        The sensor goes to ``finished`` and ``activity_ended`` fires.  Does
+        nothing when no session is running for that person.
+        """
+        state = self._states.get(person_id)
+        if not state or state.state != STATE_ACTIVE:
+            return
+        _LOGGER.info("Stopping session for %s on request", person_id)
+        await self._stop_tracking(person_id)
+        state.state = STATE_FINISHED
+        self._finish_session(person_id)
+
+    async def _on_livetrack_email(
+        self,
+        session_id: str,
+        token: str,
+        person_name: str,
+        livetrack_url: str,
+    ) -> None:
+        person_id = self.find_person(person_name)
+        if person_id is None:
+            _LOGGER.warning(
+                "Matched person name '%s' but no config found", person_name
+            )
+            return
+        await self.async_start_tracking(
+            person_id, session_id, token, livetrack_url
         )
 
     # ── Tracking loop ────────────────────────────────────────────────────
@@ -470,13 +555,17 @@ class LiveTrackHub:
             self.config_entry.data.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
         )
 
-        # Exponential backoff state for scraper failures.  The first error
-        # waits `poll_interval` (same as a normal tick), each subsequent
-        # consecutive error doubles the wait up to SCRAPER_BACKOFF_MAX.  A
-        # successful fetch resets the counter.  Rationale: transient network
-        # blips shouldn't pound Garmin for no reason, but we must not give up
-        # entirely either — a long ride can outlast any reasonable cap.
+        # Exponential backoff state for failed polls.  A poll with a failed
+        # request counts as failed unless track-points still came through
+        # (live data keeps flowing when only the metadata call is down); a
+        # 429 always counts.  Each consecutive failed poll doubles the wait
+        # (see _backoff_delay).  Rationale: transient network blips shouldn't
+        # pound Garmin for no reason, but we must not give up entirely
+        # either — a long ride can outlast any reasonable cap.
         consecutive_failures = 0
+        # Failures already logged at WARNING.  Repeats go to DEBUG, so an
+        # outage logs once instead of on every poll.
+        reported_failures: str | None = None
 
         # Throttle window for the (more expensive) track-points request.
         # The session metadata request runs every poll_interval regardless;
@@ -491,12 +580,19 @@ class LiveTrackHub:
 
         try:
             while state.state == STATE_ACTIVE:
+                failures: list[LiveTrackRequestError] = []
+                points_answered = False  # live data still flowing this poll?
+
                 # ── 1. Session metadata (always, every iteration) ──────────
                 # Cheap (~500 B), drives end-of-activity detection.
                 try:
                     session = await self.hass.async_add_executor_job(
                         scraper.fetch_session
                     )
+                except LiveTrackRequestError as err:
+                    # Keep going: track-points may still work.
+                    failures.append(err)
+                    session = {}
                 except Exception as err:  # noqa: BLE001
                     consecutive_failures += 1
                     backoff = min(
@@ -552,6 +648,10 @@ class LiveTrackHub:
                         points = await self.hass.async_add_executor_job(
                             scraper.fetch_track_points, begin
                         )
+                        points_answered = True
+                    except LiveTrackRequestError as err:
+                        failures.append(err)
+                        points = []
                     except Exception as err:  # noqa: BLE001
                         consecutive_failures += 1
                         backoff = min(
@@ -570,14 +670,6 @@ class LiveTrackHub:
                         )
                         await asyncio.sleep(backoff)
                         continue
-
-                    # Both halves of this iteration succeeded — reset backoff.
-                    if consecutive_failures:
-                        _LOGGER.info(
-                            "Scraper recovered for %s after %d failure(s)",
-                            person_id, consecutive_failures,
-                        )
-                        consecutive_failures = 0
 
                     if points:
                         last_point = points[-1]
@@ -632,14 +724,6 @@ class LiveTrackHub:
                                 person_id,
                             )
                             state.state = STATE_FINISHED
-                else:
-                    # Session-only iteration succeeded; clear backoff.
-                    if consecutive_failures:
-                        _LOGGER.info(
-                            "Scraper recovered for %s after %d failure(s)",
-                            person_id, consecutive_failures,
-                        )
-                        consecutive_failures = 0
 
                 # Honour server-side end detection if the END marker didn't.
                 if session_ended and state.state == STATE_ACTIVE:
@@ -654,12 +738,42 @@ class LiveTrackHub:
                 if state.state == STATE_FINISHED:
                     break
 
-                await asyncio.sleep(poll_interval)
+                summary = "; ".join(str(f) for f in failures) or None
+                rate_limited = any(f.status == 429 for f in failures)
+                if summary and (rate_limited or not points_answered):
+                    consecutive_failures += 1
+                    delay = _backoff_delay(
+                        failures, consecutive_failures, poll_interval
+                    )
+                else:
+                    if not summary and (consecutive_failures or reported_failures):
+                        _LOGGER.info("Garmin requests for %s work again", person_id)
+                    consecutive_failures = 0
+                    delay = poll_interval
+                if summary:
+                    log_fn = (
+                        _LOGGER.debug
+                        if summary == reported_failures
+                        else _LOGGER.warning
+                    )
+                    log_fn(
+                        "Garmin request failed for %s (next poll in %ds): %s",
+                        person_id, delay, summary,
+                    )
+                reported_failures = summary
+
+                await asyncio.sleep(delay)
 
         except asyncio.CancelledError:
             _LOGGER.debug("Tracking loop cancelled for %s", person_id)
             return
 
+        self._finish_session(person_id)
+        _LOGGER.info("Tracking loop ended for %s", person_id)
+
+    def _finish_session(self, person_id: str) -> None:
+        """Announce the end of a person's session and release its scraper."""
+        state = self._states[person_id]
         self.hass.bus.async_fire(
             EVENT_ACTIVITY_ENDED,
             {
@@ -677,12 +791,10 @@ class LiveTrackHub:
         async_dispatcher_send(self.hass, SIGNAL_UPDATE, person_id)
         async_dispatcher_send(self.hass, SIGNAL_SESSION_CHANGE)
 
-        if person_id in self._scrapers:
-            self._scrapers[person_id].close()
-            del self._scrapers[person_id]
+        scraper = self._scrapers.pop(person_id, None)
+        if scraper:
+            scraper.close()
         self._tasks.pop(person_id, None)
-
-        _LOGGER.info("Tracking loop ended for %s", person_id)
 
     async def _stop_tracking(self, person_id: str) -> None:
         task = self._tasks.pop(person_id, None)

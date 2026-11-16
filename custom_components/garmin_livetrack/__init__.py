@@ -1,21 +1,83 @@
 """Garmin LiveTrack Monitor for Home Assistant.
 
-Monitors IMAP for Garmin LiveTrack emails, scrapes live activity data,
-and exposes sensors, device trackers and events for each tracked person.
+Follows Garmin LiveTrack sessions — found in email over IMAP, or started with
+the ``start_tracking`` service — scrapes live activity data, and exposes
+sensors, device trackers and events for each tracked person.
 """
 from __future__ import annotations
 
 import logging
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+import voluptuous as vol
 
-from .const import DOMAIN
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
+
+from .const import (
+    ATTR_PERSON,
+    ATTR_URL,
+    DOMAIN,
+    LIVETRACK_BASE_URL,
+    SERVICE_START_TRACKING,
+    SERVICE_STOP_TRACKING,
+)
 from .hub import LiveTrackHub
+from .imap_listener import parse_livetrack_link
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor", "device_tracker"]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+START_TRACKING_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_PERSON): cv.string,
+        vol.Required(ATTR_URL): cv.string,
+    }
+)
+STOP_TRACKING_SCHEMA = vol.Schema({vol.Required(ATTR_PERSON): cv.string})
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the services; they act on whichever entry has the person."""
+
+    def _resolve(person: str) -> tuple[LiveTrackHub, str]:
+        for hub in hass.data.get(DOMAIN, {}).values():
+            if (person_id := hub.find_person(person)) is not None:
+                return hub, person_id
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="unknown_person",
+            translation_placeholders={"person": person},
+        )
+
+    async def _start_tracking(call: ServiceCall) -> None:
+        hub, person_id = _resolve(call.data[ATTR_PERSON])
+        session_id, token = parse_livetrack_link(call.data[ATTR_URL])
+        if not session_id or not token:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_url"
+            )
+        url = f"{LIVETRACK_BASE_URL}/session/{session_id}/token/{token}"
+        await hub.async_start_tracking(person_id, session_id, token, url)
+
+    async def _stop_tracking(call: ServiceCall) -> None:
+        hub, person_id = _resolve(call.data[ATTR_PERSON])
+        await hub.async_stop_tracking(person_id)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_START_TRACKING, _start_tracking,
+        schema=START_TRACKING_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_STOP_TRACKING, _stop_tracking,
+        schema=STOP_TRACKING_SCHEMA,
+    )
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

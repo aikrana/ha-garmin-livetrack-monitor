@@ -2,6 +2,26 @@
 
 All notable changes to this integration will be documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-11-16
+
+### Added
+
+- Manual mode: set the integration up without an email account and start each session with the new `garmin_livetrack.start_tracking` action, which takes a person and a LiveTrack link (#5).
+- `garmin_livetrack.stop_tracking` ends a person's running session as if Garmin had ended it.
+- The IMAP folder can be chosen at setup and changed later under **Configure → Email settings**, so emails that a filter moves to a subfolder are found (#4).
+
+### Changed
+
+- The device tracker's state is now always the zone (`home`, `not_home` or a zone name), also during a session. It used to be the activity name, which Home Assistant stops supporting in 2027.7 (#3); automations that checked for it should use the `activity_type` attribute or the sensor's `active` state.
+- The email age threshold moves from General settings to the new Email settings.
+
+### Fixed
+
+- When Garmin keeps failing (errors, rate limits, a retired endpoint), the integration waits longer between attempts, up to 5 minutes (15 when Garmin asks it to slow down), instead of retrying every few seconds. The failure is logged once instead of on every poll.
+- Failed requests no longer write the LiveTrack token to the log.
+- The device tracker uses the current `TrackerEntity` import; the old alias stops working in Home Assistant 2027.6 (thanks @narjekdjcusbe, #2).
+- The IMAP check during setup closes its test connection again.
+
 ## [1.0.4] — 2026-11-14
 
 ### Fixed

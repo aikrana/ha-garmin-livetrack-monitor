@@ -37,6 +37,12 @@ EVENT_ACTIVITY_DETECTED = f"{DOMAIN}_activity_detected"
 EVENT_POINT_RECEIVED = f"{DOMAIN}_point_received"
 EVENT_ACTIVITY_ENDED = f"{DOMAIN}_activity_ended"
 
+# ── Services ─────────────────────────────────────────────────────────────────
+SERVICE_START_TRACKING = "start_tracking"
+SERVICE_STOP_TRACKING = "stop_tracking"
+ATTR_PERSON = "person"  # entity prefix or full name of a tracked person
+ATTR_URL = "url"
+
 # ── Sensor states ────────────────────────────────────────────────────────────
 STATE_IDLE = "idle"
 STATE_ACTIVE = "active"
