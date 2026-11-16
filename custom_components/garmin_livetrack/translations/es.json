@@ -117,7 +117,7 @@
                 },
                 "url": {
                     "name": "Enlace de LiveTrack",
-                    "description": "El enlace de la sesión: https://livetrack.garmin.com/session/…/token/…"
+                    "description": "Enlace de la sesión de LiveTrack (livetrack.garmin.com/session/…/token/…), tal como llega en el email de Garmin."
                 }
             }
         },
@@ -137,7 +137,7 @@
             "message": "Ninguna persona configurada coincide con \"{person}\". Usa el prefijo de entidad o el nombre completo que figura en las opciones de la integración."
         },
         "invalid_url": {
-            "message": "No es un enlace de sesión de Garmin LiveTrack (https://livetrack.garmin.com/session/…/token/…)."
+            "message": "No es un enlace de sesión de Garmin LiveTrack (livetrack.garmin.com/session/…/token/…)."
         }
     }
 }
